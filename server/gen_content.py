@@ -13,11 +13,8 @@ from pptx import Presentation
 import io
 import logging
 import concurrent.futures
-import threading
-import mmap
 import tempfile
-from concurrent.futures import ThreadPoolExecutor
-from functools import partial
+from tqdm import tqdm
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 
@@ -30,68 +27,83 @@ def get_size_string(size_kb):
     else:
         return f"{size_kb:.0f}KB"
 
-def generate_content_block(size=1024*1024):  # 1MB blocks
-    """Generate a reusable content block."""
-    return ''.join(random.choices(string.ascii_letters + string.digits, k=size)).encode()
-
-def generate_binary_fast(size_mb):
-    """Generate binary content using memory mapping."""
-    target_size = int(size_mb * 1024 * 1024)
-    
-    with tempfile.NamedTemporaryFile(delete=False) as tmp:
-        # Write ELF header
-        tmp.write(bytes.fromhex('7f454c46020101000000000000000000'))
-        
-        # Fill rest with random data in chunks
-        content_block = os.urandom(1024*1024)  # 1MB block
-        bytes_written = 16  # header size
-        
-        while bytes_written < target_size:
-            tmp.write(content_block[:min(len(content_block), target_size - bytes_written)])
-            bytes_written += len(content_block)
-            
-        tmp.flush()
-        with open(tmp.name, 'rb') as f:
-            return f.read()
+def generate_elf_binary(size_mb):
+    """Generate a non-malicious ELF binary of approximately specified size."""
+    elf_header = bytes.fromhex('7f454c46020101000000000000000000')
+    padding = os.urandom(int(size_mb * 1024 * 1024) - len(elf_header))
+    return elf_header + padding
 
 def generate_document(size_mb, doc_type):
     """Generate a valid document of specified type and approximate size."""
-    buffer = io.BytesIO()
     target_size = size_mb * 1024 * 1024
     
     if size_mb > 50 and doc_type in ['docx', 'pdf', 'pptx']:
-        return None  # Skip large document generation
-    
+        return None
     if doc_type == 'xlsx' and size_mb > 10:
-        return None  # Skip large Excel generation
-        
+        return None
+
     if doc_type == 'docx':
         doc = Document()
-        # Generate a base image to reuse
-        img_buffer = io.BytesIO()
-        img_size = min(1024, int(target_size / 10))  # 10% of target or 1MB max
-        img = Image.fromarray(np.random.randint(0, 255, (img_size, img_size, 3), dtype=np.uint8))
-        img.save(img_buffer, format='PNG')
-        img_data = img_buffer.getvalue()
+        pbar = tqdm(total=target_size, desc=f"Generating {size_mb:.1f}MB DOCX", unit='B', unit_scale=True)
         
-        while buffer.tell() < target_size:
-            if buffer.tell() < target_size * 0.7:  # 70% images
-                # Add image
-                doc.add_picture(io.BytesIO(img_data))
+        # Pre-generate some content blocks
+        text_block = ''.join(random.choices(string.ascii_letters, k=1024))
+        img_data = io.BytesIO()
+        img_size = int(min(512, np.sqrt(target_size/10)))  # Smaller images, more of them
+        img = Image.fromarray(np.random.randint(0, 255, (img_size, img_size, 3), dtype=np.uint8))
+        img.save(img_data, format='PNG')
+        img_data.seek(0)
+        
+        buffer = io.BytesIO()
+        current_size = 0
+        
+        while current_size < target_size:
+            if random.random() < 0.7:  # 70% images
+                doc.add_picture(img_data)
+                img_data.seek(0)
             else:
-                # Add text
-                doc.add_paragraph(''.join(random.choices(string.ascii_letters, k=1024)))
-            doc.save(buffer)
-            if buffer.tell() >= target_size:
-                break
+                doc.add_paragraph(text_block)
+            
             buffer.seek(0)
+            doc.save(buffer)
+            new_size = buffer.tell()
+            pbar.update(new_size - current_size)
+            current_size = new_size
+            if current_size >= target_size:
+                break
+        
+        pbar.close()
         return buffer.getvalue()
-    
-    # ... rest of the document generation code remains the same ...
+
+    elif doc_type == 'pdf':
+        buffer = io.BytesIO()
+        pbar = tqdm(total=target_size, desc=f"Generating {size_mb:.1f}MB PDF", unit='B', unit_scale=True)
+        
+        c = canvas.Canvas(buffer)
+        current_size = 0
+        text_block = ''.join(random.choices(string.ascii_letters, k=1024))
+        page = 1
+        
+        while current_size < target_size and page < 1000:  # Page limit for safety
+            c.drawString(100, 100, text_block)
+            c.showPage()
+            page += 1
+            
+            if page % 10 == 0:  # Check size periodically
+                c.save()
+                new_size = buffer.tell()
+                pbar.update(new_size - current_size)
+                current_size = new_size
+                if current_size >= target_size:
+                    break
+                buffer = io.BytesIO()
+                c = canvas.Canvas(buffer)
+        
+        pbar.close()
+        return buffer.getvalue()
 
 def generate_image(size_mb):
     """Generate an image of specified size."""
-    # Calculate dimensions to achieve target file size (approximate)
     dim = int(np.sqrt((size_mb * 1024 * 1024) / 3))  # 3 channels (RGB)
     img = Image.fromarray(np.random.randint(0, 255, (dim, dim, 3), dtype=np.uint8))
     buffer = io.BytesIO()
@@ -102,25 +114,25 @@ def create_size_variants(base_size_kb=20):
     """Generate list of sizes from 20KB to 300MB, doubling each time."""
     sizes_kb = []
     current_size = base_size_kb
-    while current_size <= 300 * 1024:  # 300MB in KB
+    while current_size <= 520 * 1024:  # 300MB limit
         sizes_kb.append(current_size)
         current_size *= 2
     return sizes_kb
 
 def generate_size_variant(size_kb, output_dir):
-    """Generate all content for a specific size."""
     size_mb = size_kb / 1024
     size_str = get_size_string(size_kb)
     config_lines = []
     
     try:
-        logging.info(f"Generating content for size: {size_str}")
-        
-        # Generate binary file
+        # Generate binary file with progress bar
         binary_name = f"binary_{size_str}.bin"
-        logging.info(f"  Generating binary: {binary_name}")
-        with open(f"{output_dir}/{binary_name}", 'wb') as f:
-            f.write(generate_binary_fast(size_mb))
+        with tqdm(total=size_mb*1024*1024, desc=f"Generating {binary_name}", 
+                 unit='B', unit_scale=True) as pbar:
+            binary_data = generate_elf_binary(size_mb)
+            with open(f"{output_dir}/{binary_name}", 'wb') as f:
+                f.write(binary_data)
+            pbar.update(len(binary_data))
         config_lines.append(f"{binary_name}, {size_mb:.2f}MB")
         
         # Generate document files only for appropriate sizes
@@ -151,8 +163,8 @@ def generate_size_variant(size_kb, output_dir):
             if size_mb <= 50:
                 # For smaller files, include a mix of content
                 split_size = size_mb/4
-                zf.writestr('binary1.elf', generate_binary_fast(split_size))
-                zf.writestr('binary2.elf', generate_binary_fast(split_size))
+                zf.writestr('binary1.elf', generate_elf_binary(split_size))
+                zf.writestr('binary2.elf', generate_elf_binary(split_size))
                 doc_content = generate_document(split_size, 'pdf')
                 if doc_content:
                     zf.writestr('document.pdf', doc_content)
@@ -160,8 +172,8 @@ def generate_size_variant(size_kb, output_dir):
             else:
                 # For larger files, just split between binaries and images
                 split_size = size_mb/3
-                zf.writestr('binary1.elf', generate_binary_fast(split_size))
-                zf.writestr('binary2.elf', generate_binary_fast(split_size))
+                zf.writestr('binary1.elf', generate_elf_binary(split_size))
+                zf.writestr('binary2.elf', generate_elf_binary(split_size))
                 zf.writestr('image.jpg', generate_image(split_size))
         
         config_lines.append(f"{zip_name}, {size_mb:.2f}MB")
@@ -190,7 +202,7 @@ def generate_server_content():
         }
         
         # Collect results as they complete
-        for future in concurrent.futures.as_completed(future_to_size):
+        for future in tqdm(concurrent.futures.as_completed(future_to_size), total=len(future_to_size), desc="Generating content"):
             size_kb = future_to_size[future]
             try:
                 config_lines = future.result()

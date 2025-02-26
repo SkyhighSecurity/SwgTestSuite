@@ -1,0 +1,16 @@
+# Virtual Environment
+venv/
+
+# Server content directory
+server/server_content/
+
+# Python cache files
+__pycache__/
+*.pyc
+
+# IDE settings
+.vscode/
+.idea/
+
+# Environment files
+.env
