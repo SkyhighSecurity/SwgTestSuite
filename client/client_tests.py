@@ -62,15 +62,44 @@ async def create_request_url(session, task_queue, obj_sizes_mb, config, server_i
     return f"{scheme}://{server_ip}:{8443 if scheme == 'https' else 8080}/{path}"
 
 def create_request_url(obj_sizes_mb, config, server_ip, https_percent, avg_object_size_mb):
-    # Select objects based on average object size
-    close_sizes = [(i, size) for i, size in enumerate(obj_sizes_mb) 
-                   if abs(size - avg_object_size_mb) < 0.5 * avg_object_size_mb]
-    if not close_sizes:
-        close_sizes = [(i, size) for i, size in enumerate(obj_sizes_mb)]
-
-    index, _ = random.choice(close_sizes)
+    """Create request URL ensuring a mix of file types with appropriate sizes."""
+    # Group files by type and size
+    close_files = []
+    other_files = []
+    
+    for i, (path, size) in enumerate(config):
+        file_type = path.split('.')[-1].lower()
+        if abs(size - avg_object_size_mb) < 0.5 * avg_object_size_mb:
+            close_files.append((i, path, size, file_type))
+        else:
+            other_files.append((i, path, size, file_type))
+    
+    # If no files close to target size, use all files
+    candidate_files = close_files if close_files else other_files
+    
+    # Weighted selection based on file type
+    file_weights = {
+        'bin': 0.4,  # 40% binary files
+        'zip': 0.4,  # 40% zip files
+        'docx': 0.2, # 10% docx files
+    }
+    
+    # Filter files by type and apply weights
+    weighted_files = []
+    for idx, path, size, ftype in candidate_files:
+        weight = file_weights.get(ftype, 0.0)
+        if weight > 0:
+            weighted_files.extend([idx] * int(weight * 100))
+    
+    # If no weighted files found, fall back to any file of appropriate size
+    if not weighted_files:
+        index = random.choice([i for i, _, _ in config])
+    else:
+        index = random.choice(weighted_files)
+    
     path, _ = config[index]
-
+    
+    # Determine HTTP or HTTPS
     scheme = "https" if random.random() < https_percent / 100 else "http"
     return f"{scheme}://{server_ip}:{8443 if scheme == 'https' else 8080}/{path}"
 
