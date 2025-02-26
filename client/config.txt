@@ -1,0 +1,5 @@
+index.html, 0.1MB
+image.jpg, 1MB
+large_binary.bin, 100MB
+small_archive.zip, 100MB
+large_archive.zip, 10000MB
