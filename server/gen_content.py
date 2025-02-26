@@ -46,35 +46,45 @@ def generate_document(size_mb, doc_type):
         doc = Document()
         pbar = tqdm(total=target_size, desc=f"Generating {size_mb:.1f}MB DOCX", unit='B', unit_scale=True)
         
-        # Pre-generate some content blocks
-        text_block = ''.join(random.choices(string.ascii_letters, k=1024))
-        img_data = io.BytesIO()
-        img_size = int(min(512, np.sqrt(target_size/10)))  # Smaller images, more of them
-        img = Image.fromarray(np.random.randint(0, 255, (img_size, img_size, 3), dtype=np.uint8))
-        img.save(img_data, format='PNG')
-        img_data.seek(0)
+        # Generate one large text block (64KB)
+        text_block = ''.join(random.choices(string.ascii_letters, k=64*1024))
         
-        buffer = io.BytesIO()
+        # Generate several images of different sizes for variety
+        images = []
+        for size in [128, 256, 512]:  # Different image sizes
+            img_data = io.BytesIO()
+            img = Image.fromarray(np.random.randint(0, 255, (size, size, 3), dtype=np.uint8))
+            img.save(img_data, format='PNG', optimize=True)
+            img_data.seek(0)
+            images.append(img_data)
+        
         current_size = 0
+        buffer = io.BytesIO()
         
         while current_size < target_size:
-            if random.random() < 0.7:  # 70% images
+            # Add more images than text (80/20 ratio)
+            if random.random() < 0.8:
+                img_data = random.choice(images)
                 doc.add_picture(img_data)
                 img_data.seek(0)
             else:
+                # Add a large paragraph at once
                 doc.add_paragraph(text_block)
             
-            buffer.seek(0)
-            doc.save(buffer)
-            new_size = buffer.tell()
-            pbar.update(new_size - current_size)
-            current_size = new_size
-            if current_size >= target_size:
-                break
+            # Check size less frequently (every 5 additions)
+            if random.random() < 0.2:
+                buffer.seek(0)
+                doc.save(buffer)
+                new_size = buffer.tell()
+                pbar.update(new_size - current_size)
+                current_size = new_size
+                
+                if current_size >= target_size:
+                    break
         
         pbar.close()
         return buffer.getvalue()
-
+    
     elif doc_type == 'pdf':
         buffer = io.BytesIO()
         pbar = tqdm(total=target_size, desc=f"Generating {size_mb:.1f}MB PDF", unit='B', unit_scale=True)
@@ -111,10 +121,10 @@ def generate_image(size_mb):
     return buffer.getvalue()
 
 def create_size_variants(base_size_kb=20):
-    """Generate list of sizes from 20KB to 300MB, doubling each time."""
+    """Generate list of sizes from 20KB to 520MB, doubling each time."""
     sizes_kb = []
     current_size = base_size_kb
-    while current_size <= 520 * 1024:  # 300MB limit
+    while current_size <= 520 * 1024:  # 520MB limit
         sizes_kb.append(current_size)
         current_size *= 2
     return sizes_kb
