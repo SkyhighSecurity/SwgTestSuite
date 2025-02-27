@@ -7,6 +7,7 @@ import time
 import os
 import multiprocessing
 import signal
+from urllib.parse import urlparse
 
 async def fetch_url(session, url):
     try:
@@ -114,11 +115,18 @@ async def connection_worker(session, obj_sizes_mb, config, server_ip, https_perc
             print(f"Error in connection worker: {e}")
             await asyncio.sleep(0.1)
 
-async def run_client_instance(server_ip, max_connections, https_percent, avg_object_size_mb, config, stats_pipe, duration):
+async def run_client_instance(server_ip, max_connections, https_percent, avg_object_size_mb, config, stats_pipe, duration, proxy_url=None):
     obj_sizes_mb = [size for _, size in config]
     ssl_context = ssl.create_default_context()
     ssl_context.check_hostname = False
     ssl_context.verify_mode = ssl.CERT_NONE
+
+    # Configure proxy settings if provided
+    if proxy_url:
+        proxy_parsed = urlparse(proxy_url)
+        proxy = f"{proxy_parsed.scheme}://{proxy_parsed.netloc}"
+    else:
+        proxy = None
 
     connector = aiohttp.TCPConnector(
         ssl=ssl_context,
@@ -126,7 +134,11 @@ async def run_client_instance(server_ip, max_connections, https_percent, avg_obj
         limit_per_host=max_connections
     )
 
-    async with aiohttp.ClientSession(connector=connector) as session:
+    async with aiohttp.ClientSession(
+        connector=connector,
+        trust_env=True,  # Allow environment variables for proxy
+        proxy=proxy
+    ) as session:
         workers = [
             connection_worker(
                 session, obj_sizes_mb, config, server_ip, 
@@ -180,7 +192,7 @@ def aggregate_statistics(parent_pipes, duration):
         
         time.sleep(0.01)
 
-def run_client_process(server_ip, max_connections, https_percent, avg_object_size_mb, config, child_pipe, duration):
+def run_client_process(server_ip, max_connections, https_percent, avg_object_size_mb, config, child_pipe, duration, proxy_url=None):
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     
     loop = asyncio.new_event_loop()
@@ -190,13 +202,13 @@ def run_client_process(server_ip, max_connections, https_percent, avg_object_siz
         loop.run_until_complete(
             run_client_instance(
                 server_ip, max_connections, https_percent,
-                avg_object_size_mb, config, child_pipe, duration
+                avg_object_size_mb, config, child_pipe, duration, proxy_url
             )
         )
     finally:
         loop.close()
 
-def run_client(server_ip, max_connections, https_percent, avg_object_size_mb, duration, config_path):
+def run_client(server_ip, max_connections, https_percent, avg_object_size_mb, duration, config_path, proxy_url=None):
     config = []
     with open(config_path) as f:
         for line in f:
@@ -216,7 +228,7 @@ def run_client(server_ip, max_connections, https_percent, avg_object_size_mb, du
         p = multiprocessing.Process(
             target=run_client_process,
             args=(server_ip, connections_per_process, https_percent, 
-                  avg_object_size_mb, config, child_pipe, duration)
+                  avg_object_size_mb, config, child_pipe, duration, proxy_url)
         )
         processes.append(p)
         p.start()
@@ -236,6 +248,7 @@ if __name__ == "__main__":
     avg_object_size_mb = float(os.getenv('AVG_OBJECT_SIZE_MB', '2'))
     duration = int(os.getenv('DURATION', '60'))
     config_path = os.getenv('CONFIG_PATH', 'config.txt')
+    proxy_url = os.getenv('HTTP_PROXY')  # Support standard proxy environment variable
 
     run_client(
         server_ip=server_ip,
@@ -243,5 +256,6 @@ if __name__ == "__main__":
         https_percent=https_percent,
         avg_object_size_mb=avg_object_size_mb,
         duration=duration,
-        config_path=config_path
+        config_path=config_path,
+        proxy_url=proxy_url
     )
